@@ -9,6 +9,7 @@
 #include "Minecraft.Server/MinecraftServer.h"
 #include "Minecraft.World/entity/Entity.h"
 #include "Minecraft.World/level/Level.h"
+#include "Minecraft.World/level/block/Block.h"
 #include "Minecraft.World/level/storage/LevelData.h"
 #include "Minecraft.World/phys/Vec3.h"
 #include "Minecraft.Core/System.h"
@@ -83,8 +84,12 @@ void DebugScreenOverlay::render() {
 
     writer.printf(L"XYZ: %.3f / %.5f / %.3f\n", pos.x, pos.y, pos.z);
     writer.printf(L"Block: %i %i %i\n", blockX, blockY, blockZ);
-    // writer.printf(L"Chunk: %i %i %i [%i %i in %s]\n", chunkX, chunkY, chunkZ, blockX & 15,
-    //               blockZ & 15, "nullptr");
+
+    BlockPos blockPos(blockX, blockY - 1, blockZ);
+    Block* block = level->getBlock(blockPos);
+    int blockId = Block::getId(block);
+    writer.printf(L"Block ID under player: %i\n", blockId);
+
     writer.printf(L"Chunk: %i %i %i [%i, %i]\n", chunkX, chunkY, chunkZ, blockX & 15, blockZ & 15);
 
     writer.printf(L"Seed: %ld\n", level->getSeed());

@@ -2,10 +2,10 @@ set(LINKFLAGS -nodefaultlibs)
 set(LLDFLAGS --no-demangle --gc-sections)
 
 set(OPTIMIZE_OPTIONS_DEBUG -fno-inline -O2 -gdwarf-4)
-set(OPTIMIZE_OPTIONS_RELEASE -fno-inline -O3 -ffast-math -flto)
+set(OPTIMIZE_OPTIONS_RELEASE -fno-inline -O3 -ffast-math)
 set(WARN_OPTIONS -Werror=return-type -Wno-invalid-offsetof)
 
-set(INCLUDES include include/agl)
+set(INCLUDES include)
 
 set(ASM_OPTIONS "")
 set(C_OPTIONS -ffunction-sections -fdata-sections)

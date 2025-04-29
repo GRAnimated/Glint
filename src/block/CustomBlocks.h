@@ -4,5 +4,7 @@
 
 class CustomBlocks {
 public:
+    static const int MAX_IDS = 3001;
+
     static FireBlock* CUSTOM_BLOCK;
 };

@@ -7,16 +7,17 @@
 #include "Minecraft.World/level/chunk/storage/OldChunkStorage.h"
 #include "Minecraft.Core/io/DataInputStream.h"
 #include "Minecraft.Core/io/FileInputStream.h"
+#include "block/CustomBlocks.h"
 
 #include "hk/hook/InstrUtil.h"
 #include "hk/hook/Trampoline.h"
 
-std::unordered_map<LevelChunk*, LevelChunkExtraData> LevelChunkExtraData::s_extraDataMap;
+std::unordered_map<LevelChunk*, LevelChunkExtraData> LevelChunkExtraData::sExtraDataMap;
 
 LevelChunkExtraData::LevelChunkExtraData() : extraBlockDataLower(true), extraBlockDataUpper(true) {}
 
 LevelChunkExtraData& LevelChunkExtraData::get(LevelChunk* chunk) {
-    auto [it, inserted] = s_extraDataMap.try_emplace(chunk);  // C++17: emplace if not exists
+    auto [it, inserted] = sExtraDataMap.try_emplace(chunk);
 
     return it->second;
 }
@@ -38,9 +39,9 @@ void LevelChunkExtraData::load(DataInputStream* stream) {
 }
 
 void LevelChunkExtraData::onLevelChunkDestroyed(LevelChunk* chunk) {
-    auto it = s_extraDataMap.find(chunk);
-    if (it != s_extraDataMap.end()) {
-        s_extraDataMap.erase(it);
+    auto it = sExtraDataMap.find(chunk);
+    if (it != sExtraDataMap.end()) {
+        sExtraDataMap.erase(it);
     }
 }
 
@@ -52,112 +53,89 @@ HkTrampoline<void, LevelChunk*, Level*, int, int> levelChunkInit
           LevelChunkExtraData::get(chunk);  // initialize extra data
       });
 
-// THESE ARE UNUSED BY THE GAME!!!
-/*
-HkTrampoline<void, OldChunkStorage*, LevelChunk*, Level*, CompoundTag*> chunkStorageSave
-    = hk::hook::trampoline(
-        [](OldChunkStorage* chunkStorage, LevelChunk* chunk, Level* level, CompoundTag* tag) -> void {
-            chunkStorageSave.orig(chunkStorage, chunk, level, tag);
-
-            hk::gfx::imguiLog("Saving extra data for chunk at (%d, %d)\n", chunk->xPos, chunk->zPos);
-            LevelChunkExtraData::get(chunk).save(tag);
-        });
-
-*/
-
-class DataFixerUpper;
-
-HkTrampoline<void, Level*, DataInputStream*, DataFixerUpper*, LevelChunk*> chunkStorageLoad
-    = hk::hook::trampoline(
-        [](Level* level, DataInputStream* stream, DataFixerUpper* fixerUpper, LevelChunk* chunk) -> void {
-            chunkStorageLoad.orig(level, stream, fixerUpper, chunk);
-
-            hk::gfx::imguiLog("Loading extra data for chunk at (%d, %d)\n", chunk->xPos, chunk->zPos);
-
-            LevelChunkExtraData::get(chunk).load(stream);
-        });
-
 HkTrampoline<void, LevelChunk*> levelChunkDtor = hk::hook::trampoline([](LevelChunk* chunk) -> void {
     levelChunkDtor.orig(chunk);
     LevelChunkExtraData::onLevelChunkDestroyed(chunk);
 });
 
-HkTrampoline<int, LevelChunk*, int, int, int> getBlockId
-    = hk::hook::trampoline([](LevelChunk* chunk, int x, int y, int z) -> int {
-          int baseId = getBlockId.orig(chunk, x, y, z);
+HkTrampoline<int, LevelChunk*, int, int, int> getBlockId = hk::hook::trampoline([](LevelChunk* chunk, int x,
+                                                                                   int y, int z) -> int {
+    int baseId = getBlockId.orig(chunk, x, y, z);
 
-          LevelChunkExtraData& extraData = LevelChunkExtraData::get(chunk);
-          int extraBits = (y < 128) ? extraData.extraBlockDataLower.get(x, y, z) :
-                                      extraData.extraBlockDataUpper.get(x, y - 128, z);
+    LevelChunkExtraData& extraData = LevelChunkExtraData::get(chunk);
+    int extraBits = (y < 128) ? extraData.extraBlockDataLower.get(x, y, z) :
+                                extraData.extraBlockDataUpper.get(x, y - 128, z);
 
-          int fullId = (extraBits << 8) | baseId;
-          return fullId;
+    int fullId = (extraBits << 8) | baseId;
+
+    if (fullId > 255)
+        hk::gfx::imguiLog("Getting block ID at (%d, %d, %d) with base ID: %d, extra bits: %d, full ID: %d\n",
+                          x, y, z, baseId, extraBits, fullId);
+
+    return fullId;
+});
+
+int storedY = 0;
+
+HkTrampoline<void, LevelChunk*, int, int, int, int, int, bool> setBlockAndData
+    = hk::hook::trampoline([](LevelChunk* chunk, int x, int y, int z, int id, int data, bool flag) -> void {
+          storedY = y;
+
+          if (id > 255) {
+              hk::gfx::imguiLog("Setting block and data at (%d, %d, %d) with ID: %d, data: %d\n", x, y, z, id,
+                                data);
+          }
+          setBlockAndData.orig(chunk, x, y, z, id, data, flag);
       });
 
 void setExtraBlockData(CompressedBlockStorage* storage, int x, int y, int z, int id) {
     int baseId = id & 0xFF;
     int extraBits = (id >> 8) & 0x0F;
 
+    // if (extraBits > 0) {
+    //     hk::gfx::imguiLog("Setting extra block data at (%d, %d, %d) with ID: %d\n", x, y, z, id);
+    // }
+
     storage->set(x, y, z, baseId);
 
+    // Chunk exists in X19
     LevelChunk* chunk;
     __asm volatile("MOV %0, X19" : "=r"(chunk));
-    if (!chunk)
+    if (!chunk) {
+        hk::gfx::imguiLog("Chunk is null, cannot set extra block data\n");
         return;
+    }
 
     LevelChunkExtraData& extraData = LevelChunkExtraData::get(chunk);
 
-    if (y < 128) {
-        extraData.extraBlockDataLower.set(x, y, z, extraBits);
+    if (extraBits == 0) {
+        // We need to clear the extra bits
+        if (storedY < 128) {
+            extraData.extraBlockDataLower.set(x, storedY, z, 0);
+        } else {
+            extraData.extraBlockDataUpper.set(x, storedY - 128, z, 0);
+        }
+        return;
+    }
+
+    if (storedY < 128) {
+        int prev = extraData.extraBlockDataLower.get(x, storedY, z);
+        if (prev)
+            hk::gfx::imguiLog("Previous extra data at (%d, %d, %d): %d\n", x, storedY, z, prev);
+        extraData.extraBlockDataLower.set(x, storedY, z, extraBits);
     } else {
-        extraData.extraBlockDataUpper.set(x, y - 128, z, extraBits);
+        int prev = extraData.extraBlockDataUpper.get(x, storedY, z);
+        if (prev)
+            hk::gfx::imguiLog("Previous extra data at (%d, %d, %d): %d\n", x, storedY, z, prev);
+        extraData.extraBlockDataUpper.set(x, storedY - 128, z, extraBits);
     }
-}
-
-LevelChunk* savedChunk;
-
-HkTrampoline<void, LevelChunk*, Level*, DataOutputStream*> chunkStorageSaveNew
-    = hk::hook::trampoline([](LevelChunk* chunk, Level* level, DataOutputStream* stream) -> void {
-          hk::gfx::imguiLog("Storing chunk ptr at (%d, %d)\n", chunk->xPos, chunk->zPos);
-          savedChunk = chunk;
-
-          chunkStorageSaveNew.orig(chunk, level, stream);
-
-          hk::gfx::imguiLog("Saving extra data for chunk at (%d, %d)\n", savedChunk->xPos, savedChunk->zPos);
-
-          // LevelChunkExtraData::get(savedChunk).save(stream);
-      });
-
-void saveHook(CompoundTag* tag, DataOutput* out) {
-    hk::gfx::imguiLog("Saving extra data for chunk at (%d, %d)\n", savedChunk->xPos, savedChunk->zPos);
-
-    // The output stream gets casted into a DataOutput, so we need to get the DataOutputStream back
-    DataOutputStream* outStream;
-    __asm volatile("MOV %0, X24" : "=r"(outStream));
-
-    LevelChunkExtraData::get(savedChunk).save(outStream);
-
-    if (tag == nullptr) {
-        hk::gfx::imguiLog("Tag is null\n");
-    }
-
-    if (out == nullptr) {
-        hk::gfx::imguiLog("Output stream is null\n");
-    }
-
-    hk::gfx::imguiLog("Calling NbtIo::write now\n");
-    NbtIo::write(tag, out);
-}
-
-void doNothing() {
-    hk::gfx::imguiLog("Avoiding updateData call\n");
 }
 
 HkTrampoline<void, LevelChunk*, DataInputStream*> readCompressedBlockDataHook
     = hk::hook::trampoline([](LevelChunk* chunk, DataInputStream* stream) -> void {
           readCompressedBlockDataHook.orig(chunk, stream);
 
-          hk::gfx::imguiLog("Reading extra data for chunk at (%d, %d)\n", chunk->xPos, chunk->zPos);
+          // hk::gfx::imguiLog("Reading extra data for chunk at (%d, %d)\n", chunk->xPos, chunk->zPos);
 
           LevelChunkExtraData& extraData = LevelChunkExtraData::get(chunk);
           extraData.extraBlockDataLower.read(stream);
@@ -168,39 +146,41 @@ HkTrampoline<void, LevelChunk*, DataOutputStream*> writeCompressedBlockDataHook
     = hk::hook::trampoline([](LevelChunk* chunk, DataOutputStream* stream) -> void {
           writeCompressedBlockDataHook.orig(chunk, stream);
 
-          hk::gfx::imguiLog("Writing extra data for chunk at (%d, %d)\n", chunk->xPos, chunk->zPos);
+          // hk::gfx::imguiLog("Writing extra data for chunk at (%d, %d)\n", chunk->xPos, chunk->zPos);
 
           LevelChunkExtraData& extraData = LevelChunkExtraData::get(chunk);
           extraData.extraBlockDataLower.write(stream);
           extraData.extraBlockDataUpper.write(stream);
       });
 
-void LevelChunkExtraData::initHooks() {
-    // chunkStorageSave
-    //     .installAtSym<"_ZN15OldChunkStorage4saveEP10LevelChunkP5LevelP11CompoundTag">();  // UNUSED
-    // chunkStorageLoad
-    //     .installAtSym<"_ZN15OldChunkStorage4loadEP5LevelP15DataInputStreamP14DataFixerUpperP10LevelChunk">();
-    //  chunkStorageLoad2.installAtSym<"_ZN15OldChunkStorage4loadEP5LeveliiP10LevelChunk">();
+HkTrampoline<Block*, int> blockById = hk::hook::trampoline([](int id) -> Block* {
+    Block* block = blockById.orig(id);
 
+    if (block)
+        return block;
+
+    hk::gfx::imguiLog("Block not found for ID, checking custom case: %d\n", id);
+    if (id == 3000) {
+        return CustomBlocks::CUSTOM_BLOCK;
+    }
+    return nullptr;
+});
+
+void LevelChunkExtraData::initHooks() {
     levelChunkInit.installAtSym<"_ZN10LevelChunk4initEP5Levelii">();
     levelChunkDtor.installAtSym<"_ZN10LevelChunkD1Ev">();
 
     getBlockId.installAtSym<"_ZN10LevelChunk10getBlockIdEiii">();
 
-    // chunkStorageSaveNew.installAtSym<"_ZN15OldChunkStorage4saveEP10LevelChunkP5LevelP16DataOutputStream">();
-
     readCompressedBlockDataHook.installAtSym<"_ZN10LevelChunk23readCompressedBlockDataEP15DataInputStream">();
     writeCompressedBlockDataHook
         .installAtSym<"_ZN10LevelChunk24writeCompressedBlockDataEP16DataOutputStream">();
 
+    setBlockAndData.installAtSym<"_ZN10LevelChunk15setBlockAndDataEiiiiib">();
+
+    blockById.installAtSym<"_ZN5Block4byIdEi">();
+
     const hk::ro::RoModule* main = hk::ro::getMainModule();
     hk::hook::writeBranchLink(main, 0x209A78, setExtraBlockData);  // setBlock
     hk::hook::writeBranchLink(main, 0x209FF8, setExtraBlockData);  // setBlockAndData
-
-    // hk::hook::writeBranchLink(
-    //     main, 0x2329FC,
-    //     saveHook);  // NbtIo::write inside of
-    //                 //  _ZN15OldChunkStorage4saveEP10LevelChunkP5LevelP16DataOutputStream
-
-    // hk::hook::writeBranchLink(main, 0x2317D0, doNothing);  // Fuck you DataFixerUpper
 }
